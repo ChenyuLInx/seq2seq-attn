@@ -121,6 +121,7 @@ def get_data(args):
         newseqlength = seqlength + 2 #add 2 for EOS and BOS
         targets = np.zeros((num_sents, newseqlength), dtype=int)
         target_output = np.zeros((num_sents, newseqlength), dtype=int)
+        source_output = np.zeros((num_sents, newseqlength), dtype=int)
         sources = np.zeros((num_sents, newseqlength), dtype=int)
         source_lengths = np.zeros((num_sents,), dtype=int)
         target_lengths = np.zeros((num_sents,), dtype=int)
@@ -161,6 +162,7 @@ def get_data(args):
             targ = np.array(targ, dtype=int)
 
             src = pad(src, newseqlength, src_indexer.PAD)
+            src1 = pad(src, newseqlength, src_indexer.PAD)
             src_char = []
             for word in src:
                 if chars == 1:
@@ -173,7 +175,10 @@ def get_data(args):
                     src_char.append(char_idx)
             src = src_indexer.convert_sequence(src)
             src = np.array(src, dtype=int)
-            
+            #self added src1 to mimic the function of target output
+            src1 = src_indexer.convert_sequence(src1)
+            src1 = np.array(src1, dtype=int)
+
             if unkfilter > 0:
                 targ_unks = float((targ[:-1] == 2).sum())
                 src_unks = float((src == 2).sum())                
@@ -193,6 +198,7 @@ def get_data(args):
             source_lengths[sent_id] = (sources[sent_id] != 1).sum()            
             if chars == 1:
                 sources_char[sent_id] = np.array(src_char, dtype=int)
+            source_output[sent_id] = np.array(src1[1:],dtype=int)
 
             sent_id += 1
             if sent_id % 100000 == 0:
@@ -204,6 +210,7 @@ def get_data(args):
             targets = targets[rand_idx]
             target_output = target_output[rand_idx]
             sources = sources[rand_idx]
+            source_output = source_output[rand_idx]
             source_lengths = source_lengths[rand_idx]
             target_lengths = target_lengths[rand_idx]
             if chars==1:
@@ -215,6 +222,7 @@ def get_data(args):
         source_sort = np.argsort(source_lengths) 
 
         sources = sources[source_sort]
+        source_output = source_output[source_sort]
         targets = targets[source_sort]
         target_output = target_output[source_sort]
         target_l = target_lengths[source_sort]
@@ -252,6 +260,7 @@ def get_data(args):
         f["source"] = sources
         f["target"] = targets
         f["target_output"] = target_output
+        f["source_output"] = source_output
         f["target_l"] = np.array(target_l_max, dtype=int)
         f["target_l_all"] = target_l        
         f["batch_l"] = np.array(batch_l, dtype=int)
@@ -261,7 +270,7 @@ def get_data(args):
         f["source_size"] = np.array([len(src_indexer.d)])
         f["target_size"] = np.array([len(target_indexer.d)])
         if chars == 1:            
-            del sources, targets, target_output
+            del sources, targets, target_output, source_output
             sources_char = sources_char[source_sort]
             f["source_char"] = sources_char
             del sources_char

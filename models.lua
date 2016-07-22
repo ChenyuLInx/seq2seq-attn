@@ -10,84 +10,84 @@ function nn.Module:setReuse()
 end
 
 function make_lstm(data, opt, model, use_chars)
-   assert(model == 'enc' or model == 'dec')
-   local name = '_' .. model
-   local dropout = opt.dropout or 0
-   local n = opt.num_layers
-   local rnn_size = opt.rnn_size
-   local input_size
-   if use_chars == 0 then
-      input_size = opt.word_vec_size
-   else
-      input_size = opt.num_kernels
-   end   
-   local offset = 0
+  assert(model == 'enc' or model == 'dec')
+  local name = '_' .. model
+  local dropout = opt.dropout or 0
+  local n = opt.num_layers
+  local rnn_size = opt.rnn_size
+  local input_size
+  if use_chars == 0 then
+    input_size = opt.word_vec_size
+  else
+    input_size = opt.num_kernels
+  end   
+  local offset = 0
   -- there will be 2*n+3 inputs
-   local inputs = {}
-   table.insert(inputs, nn.Identity()()) -- x (batch_size x max_word_l)
-   if model == 'dec' then
-      table.insert(inputs, nn.Identity()()) -- all context (batch_size x source_l x rnn_size)
-      offset = offset + 1
-      if opt.input_feed == 1 then
-	 table.insert(inputs, nn.Identity()()) -- prev context_attn (batch_size x rnn_size)
-	 offset = offset + 1
-      end
-   end
-   for L = 1,n do
-      table.insert(inputs, nn.Identity()()) -- prev_c[L]
-      table.insert(inputs, nn.Identity()()) -- prev_h[L]
-   end
+  local inputs = {}
+  table.insert(inputs, nn.Identity()()) -- x (batch_size x max_word_l)
+  if model == 'dec' then
+    table.insert(inputs, nn.Identity()()) -- all context (batch_size x source_l x rnn_size)
+    offset = offset + 1
+    if opt.input_feed == 1 then
+    	 table.insert(inputs, nn.Identity()()) -- prev context_attn (batch_size x rnn_size)
+    	 offset = offset + 1
+    end
+  end
+  for L = 1,n do
+    table.insert(inputs, nn.Identity()()) -- prev_c[L]
+    table.insert(inputs, nn.Identity()()) -- prev_h[L]
+  end
 
-   local x, input_size_L
-   local outputs = {}
+  local x, input_size_L
+  local outputs = {}
   for L = 1,n do
      -- c,h from previous timesteps
     local prev_c = inputs[L*2+offset]    
     local prev_h = inputs[L*2+1+offset]
     -- the input to this layer
     if L == 1 then
-       if use_chars == 0 then
-	  local word_vecs
-	  if model == 'enc' then
-	     word_vecs = nn.LookupTable(data.source_size, input_size)
-	  else
-	     word_vecs = nn.LookupTable(data.target_size, input_size)
-	  end	  
-	  word_vecs.name = 'word_vecs' .. name
-	  x = word_vecs(inputs[1]) -- batch_size x word_vec_size
-       else
-	  local char_vecs = nn.LookupTable(data.char_size, opt.char_vec_size)
-	  char_vecs.name = 'word_vecs' .. name
-	  local charcnn = make_cnn(opt.char_vec_size,  opt.kernel_width, opt.num_kernels)
-	  charcnn.name = 'charcnn' .. name
-	  x = charcnn(char_vecs(inputs[1]))
-	  if opt.num_highway_layers > 0 then
-	     local mlp = make_highway(input_size, opt.num_highway_layers)
-	     mlp.name = 'mlp' .. name
-	     x = mlp(x)
-	  end	  
-       end
-       input_size_L = input_size
-       if model == 'dec' then
-	  if opt.input_feed == 1 then
-	     x = nn.JoinTable(2)({x, inputs[1+offset]}) -- batch_size x (word_vec_size + rnn_size)
-	     input_size_L = input_size + rnn_size
-	  end	  
-       end
+      if use_chars == 0 then
+        local word_vecs
+        if model == 'enc' then
+          word_vecs = nn.LookupTable(data.source_size, input_size)
+        else
+          word_vecs = nn.LookupTable(data.target_size, input_size)
+        end
+        word_vecs.name = 'word_vecs' .. name
+        x = word_vecs(inputs[1]) -- batch_size x word_vec_size
+      else
+        local char_vecs = nn.LookupTable(data.char_size, opt.char_vec_size)
+        char_vecs.name = 'word_vecs' .. name
+        local charcnn = make_cnn(opt.char_vec_size,  opt.kernel_width, opt.num_kernels)
+        charcnn.name = 'charcnn' .. name
+        x = charcnn(char_vecs(inputs[1]))
+        if opt.num_highway_layers > 0 then
+          local mlp = make_highway(input_size, opt.num_highway_layers)
+          mlp.name = 'mlp' .. name
+          x = mlp(x)
+        end	  
+      end
+      input_size_L = input_size
+      if model == 'dec' then
+        if opt.input_feed == 1 then
+          x = nn.JoinTable(2)({x, inputs[1+offset]}) -- batch_size x (word_vec_size + rnn_size)
+          input_size_L = input_size + rnn_size
+        end	  
+      end
     else
-       x = outputs[(L-1)*2]
-       if opt.res_net == 1 and L > 2 then
-	  x = nn.CAddTable()({x, outputs[(L-2)*2]})       
-       end       
-       input_size_L = rnn_size
-       if opt.multi_attn == L and model == 'dec' then
-	  local multi_attn = make_decoder_attn(data, opt, 1)
-	  multi_attn.name = 'multi_attn' .. L
-	  x = multi_attn({x, inputs[2]})
-       end
-       if dropout > 0 then
-	  x = nn.Dropout(dropout, nil, false)(x)
-       end       
+      x = outputs[(L-1)*2]
+      if opt.res_net == 1 and L > 2 then
+        x = nn.CAddTable()({x, outputs[(L-2)*2]})       
+      end       
+      input_size_L = rnn_size
+      if opt.multi_attn == L and model == 'dec' then
+        local multi_attn = make_decoder_attn(data, opt, 1)
+        multi_attn.name = 'multi_attn' .. L
+        x = multi_attn({x, inputs[2]})
+      end
+      if dropout > 0 then
+        x = nn.Dropout(dropout, nil, false)(x)
+      end       
     end
     -- evaluate the input sums at once for efficiency
     local i2h = nn.Linear(input_size_L, 4 * rnn_size):reuseMem()(x)
@@ -104,30 +104,30 @@ function make_lstm(data, opt, model, use_chars)
     local in_transform = nn.Tanh():reuseMem()(n4)
     -- perform the LSTM update
     local next_c           = nn.CAddTable()({
-        nn.CMulTable()({forget_gate, prev_c}),
-        nn.CMulTable()({in_gate,     in_transform})
+      nn.CMulTable()({forget_gate, prev_c}),
+      nn.CMulTable()({in_gate,     in_transform})
       })
     -- gated cells form the output
     local next_h = nn.CMulTable()({out_gate, nn.Tanh():reuseMem()(next_c)})
-    
+
     table.insert(outputs, next_c)
     table.insert(outputs, next_h)
   end
   if model == 'dec' then
-     local top_h = outputs[#outputs]
-     local decoder_out
-     if opt.attn == 1 then
-	local decoder_attn = make_decoder_attn(data, opt)
-	decoder_attn.name = 'decoder_attn'
-	decoder_out = decoder_attn({top_h, inputs[2]})
-     else
-	decoder_out = nn.JoinTable(2)({top_h, inputs[2]})
-	decoder_out = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2, opt.rnn_size)(decoder_out))
-     end
-     if dropout > 0 then
-	decoder_out = nn.Dropout(dropout, nil, false)(decoder_out)
-     end     
-     table.insert(outputs, decoder_out)
+    local top_h = outputs[#outputs]
+    local decoder_out
+    if opt.attn == 1 then
+      local decoder_attn = make_decoder_attn(data, opt)
+      decoder_attn.name = 'decoder_attn'
+      decoder_out = decoder_attn({top_h, inputs[2]})
+    else
+      decoder_out = nn.JoinTable(2)({top_h, inputs[2]})
+      decoder_out = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2, opt.rnn_size)(decoder_out))
+    end
+    if dropout > 0 then
+      decoder_out = nn.Dropout(dropout, nil, false)(decoder_out)
+    end     
+    table.insert(outputs, decoder_out)
   end
   return nn.gModule(inputs, outputs)
 end
