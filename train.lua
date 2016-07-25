@@ -83,6 +83,8 @@ cmd:option('-epochs', 13, [[Number of training epochs]])
 cmd:option('-start_epoch', 1, [[If loading from a checkpoint, the epoch from which to start]])
 cmd:option('-param_init', 0.1, [[Parameters are initialized over uniform distribution with support
  (-param_init, param_init)]])
+cmd:option('-optim', 'sgd', [[Optimization method. Possible options are: 
+                              sgd (vanilla SGD), adagrad, adadelta, adam]])
 cmd:option('-learning_rate', 1, [[Starting learning rate. If AdaGrad is used, then this is the
   global learning rate.]])
 cmd:option('-adagrad', 0, [[Use AdaGrad instead of vanilla SGD.]])
@@ -208,18 +210,26 @@ function train(train_data, valid_data)
   end         
 
   -- prototypes for gradients so there is no need to clone
-  local encoder_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-  local encoder_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-  local encoder_bwd_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-  -- (joint) prototypes for joint model gradiants
-  local encoder_2_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-  local encoder_2_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  encoder_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  encoder_bwd_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  -- (joint) prototypes for joint model gradiants(did not consider bidirectional )
+  encoder_2_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  encoder_2_bwd_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
   context_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-  context_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
   --（joint） create for use TODO
   if opt.joint == 1 then
     context_proto3 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
-    context_proto4 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  end
+  -- need more copies of the above if using two gpus
+  if opt.gpuid2 >= 0 then
+    encoder_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+    context_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+    encoder_bwd_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+    if opt.joint == 1 then
+      encoder_2_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+      context_proto4 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+      encoder_2_bwd_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+    end      
   end
   -- clone encoder/decoder up to max source/target length   
   decoder_clones = clone_many_times(decoder, opt.max_sent_l_targ)
@@ -261,40 +271,59 @@ function train(train_data, valid_data)
   -- setup the initial parameters(self)
   local h_init = torch.zeros(opt.max_batch_l, opt.rnn_size)
   if opt.gpuid >= 0 then
-    h_init = h_init:cuda()      
+    h_init = h_init:cuda()
     cutorch.setDevice(opt.gpuid)
     if opt.gpuid2 >= 0 then
-      cutorch.setDevice(opt.gpuid)
       encoder_grad_proto2 = encoder_grad_proto2:cuda()
-      context_proto = context_proto:cuda()	 
+      encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
+      context_proto = context_proto:cuda()
+      --(JOINT) for joint model
+      if opt.joint == 1 then
+        encoder_2_grad_proto2 = encoder_2_grad_proto2:cuda()
+        encoder_2_bwd_grad_proto2 = encoder_2_bwd_grad_proto2:cuda()
+        context_proto_3= context_proto_3:cuda()
+      end 
       cutorch.setDevice(opt.gpuid2)
       encoder_grad_proto = encoder_grad_proto:cuda()
-      context_proto2 = context_proto2:cuda()	 
+      encoder_bwd_grad_proto = encoder_bwd_grad_proto:cuda()
+      context_proto2 = context_proto2:cuda()
+      if opt.joint == 1 then
+        encoder_2_grad_proto = encoder_2_grad_proto:cuda()
+        encoder_2_bwd_grad_proto = encoder_2_bwd_grad_proto:cuda()
+        context_proto4 = context_proto4:cuda()
+      end
+      cutorch.setDevice(opt.gpuid)	 
     else
       context_proto = context_proto:cuda()
       encoder_grad_proto = encoder_grad_proto:cuda()
+      --TODO TO UNDERSTAND why cuda encoder here again
       if opt.brnn == 1 then
        encoder_bwd_grad_proto = encoder_bwd_grad_proto:cuda()
      end	 
    end
   end
-  -- init states (self)
+  -- these are initial states of encoder/decoder for fwd/bwd steps
   init_fwd_enc = {}
   init_bwd_enc = {}
   init_fwd_dec = {}
   init_bwd_dec = {}
-  if opt.input_feed == 1 then
-    table.insert(init_fwd_dec, h_init:clone())
-  end
-  table.insert(init_bwd_dec, h_init:clone())
 
   for L = 1, opt.num_layers do
     table.insert(init_fwd_enc, h_init:clone())
     table.insert(init_fwd_enc, h_init:clone())
     table.insert(init_bwd_enc, h_init:clone())
     table.insert(init_bwd_enc, h_init:clone())
-    table.insert(init_fwd_dec, h_init:clone()) -- memory cell
-    table.insert(init_fwd_dec, h_init:clone()) -- hidden state
+  end
+  if opt.gpuid2 >= 0 then
+    cutorch.setDevice(opt.gpuid2)
+  end
+  if opt.input_feed == 1 then
+    table.insert(init_fwd_dec, h_init:clone())
+  end
+  table.insert(init_bwd_dec, h_init:clone())   
+  for L = 1, opt.num_layers do
+    table.insert(init_fwd_dec, h_init:clone()) 
+    table.insert(init_fwd_dec, h_init:clone()) 
     table.insert(init_bwd_dec, h_init:clone())
     table.insert(init_bwd_dec, h_init:clone())      
   end      
@@ -380,19 +409,19 @@ function train(train_data, valid_data)
       local batch_l, target_l, source_l = d[5], d[6], d[7]
 
       local encoder_grads = encoder_grad_proto[{{1, batch_l}, {1, source_l}}]
+      --（joint）create container for joint encoder
+      local encoder_2_grads = encoder_2_grad_proto[{{1, batch_l}, {1, target_l}}]
       local encoder_bwd_grads 
       if opt.brnn == 1 then
         encoder_bwd_grads = encoder_bwd_grad_proto[{{1, batch_l}, {1, source_l}}]
       end	 
-      --（joint）create container for joint encoder
-      local encoder_2_grads = encoder_2_grad_proto[{{1, batch_l}, {1, target_l}}]
+      if opt.gpuid >= 0 then
+       cutorch.setDevice(opt.gpuid)
+      end
       local rnn_state_enc_2 = reset_state(init_fwd_enc, batch_l, 0)
       local rnn_state_enc = reset_state(init_fwd_enc, batch_l, 0)
       local context = context_proto[{{1, batch_l}, {1, source_l}}]
       local context_joint = context_proto[{{1, batch_l}, {1, target_l}}]
-      if opt.gpuid >= 0 then
-       cutorch.setDevice(opt.gpuid)
-      end
       -- forward prop encoder
       for t = 1, source_l do
         encoder_clones[t]:training()
@@ -410,24 +439,7 @@ function train(train_data, valid_data)
           rnn_state_enc_2[t] = out-- save the encoder status for backprop(self)
           context_joint[{{},t}]:copy(out[#out])
         end
-      end
-      -- forward prop decoder
-      local rnn_state_dec = reset_state(init_fwd_dec, batch_l, 0)
-      local rnn_state_dec_2 = reset_state(init_fwd_dec, batch_l, 0)
-      if opt.init_dec == 1 then
-        --use the status from last encoder
-        for L = 1, opt.num_layers do
-          rnn_state_dec[0][L*2-1+opt.input_feed]:copy(rnn_state_enc[source_l][L*2-1])
-          rnn_state_dec[0][L*2+opt.input_feed]:copy(rnn_state_enc[source_l][L*2])
-        end
-        -- (joint)
-        if opt.joint == 1 then
-          for L = 1, opt.num_layers do
-            rnn_state_dec_2[0][L*2-1+opt.input_feed]:copy(rnn_state_enc_2[source_l][L*2-1])
-            rnn_state_dec_2[0][L*2+opt.input_feed]:copy(rnn_state_enc_2[source_l][L*2])
-          end
-        end
-      end	 
+      end 
 
       local rnn_state_enc_bwd
       if opt.brnn == 1  then
@@ -438,12 +450,6 @@ function train(train_data, valid_data)
           local out = encoder_bwd_clones[t]:forward(encoder_input)
           rnn_state_enc_bwd[t] = out -- save the encoder status for backprop
           context[{{},t}]:add(out[#out])	       
-        end
-        if opt.init_dec == 1 then
-          for L = 1, opt.num_layers do
-            rnn_state_dec[0][L*2-1+opt.input_feed]:add(rnn_state_enc_bwd[1][L*2-1])
-            rnn_state_dec[0][L*2+opt.input_feed]:add(rnn_state_enc_bwd[1][L*2])
-          end
         end	 	    
       end
       --TODO set up gpu for joint model
@@ -453,7 +459,29 @@ function train(train_data, valid_data)
         context2:copy(context)
         context = context2
       end	 
+      -- copy encoder last hidden state to decoder initial state
+      local rnn_state_dec = reset_state(init_fwd_dec, batch_l, 0)
+      local rnn_state_dec_2 = reset_state(init_fwd_dec, batch_l, 0)
+      if opt.init_dec == 1 then
+        for L = 1, opt.num_layers do
+          rnn_state_dec[0][L*2-1+opt.input_feed]:copy(rnn_state_enc[source_l][L*2-1])
+          rnn_state_dec[0][L*2+opt.input_feed]:copy(rnn_state_enc[source_l][L*2])
+        end
+        if opt.brnn == 1 then
+          for L = 1, opt.num_layers do
+            rnn_state_dec[0][L*2-1+opt.input_feed]:add(rnn_state_enc_bwd[1][L*2-1])
+            rnn_state_dec[0][L*2+opt.input_feed]:add(rnn_state_enc_bwd[1][L*2])
+          end
+        end
+        if opt.joint == 1 then
+          for L = 1, opt.num_layers do
+            rnn_state_dec_2[0][L*2-1+opt.input_feed]:copy(rnn_state_enc_2[source_l][L*2-1])
+            rnn_state_dec_2[0][L*2+opt.input_feed]:copy(rnn_state_enc_2[source_l][L*2])
+          end
+        end           
+      end
 
+      -- forward prop decoder
       local preds = {}
       local preds_2 = {}--(joint)
       local decoder_input
@@ -680,11 +708,11 @@ function train(train_data, valid_data)
       grad_norm = grad_norm^0.5	 
       if opt.brnn == 1 then
         word_vec_layers[1].gradWeight:add(word_vec_layers[3].gradWeight)
-      -- if opt.use_chars_enc == 1 then
-      --    for j = 1, charcnn_offset do
-      -- 	  charcnn_grad_layers[j]:add(charcnn_grad_layers[j+charcnn_offset])
-      --    end
-      -- end	    
+        if opt.use_chars_enc == 1 then
+           for j = 1, charcnn_offset do
+        	  charcnn_grad_layers[j]:add(charcnn_grad_layers[j+charcnn_offset])
+           end
+        end	    
       end	 
       -- Shrink norm and update params
       local param_norm = 0
@@ -709,12 +737,12 @@ function train(train_data, valid_data)
       end	 
       param_norm = param_norm^0.5
       if opt.brnn == 1 then
-       word_vec_layers[3].weight:copy(word_vec_layers[1].weight)
-      -- if opt.use_chars_enc == 1 then
-      --    for j = 1, charcnn_offset do
-      -- 	  charcnn_layers[j+charcnn_offset]:copy(charcnn_layers[j])
-      --    end
-      -- end	    
+        word_vec_layers[3].weight:copy(word_vec_layers[1].weight)
+        if opt.use_chars_enc == 1 then
+           for j = 1, charcnn_offset do
+        	  charcnn_layers[j+charcnn_offset]:copy(charcnn_layers[j])
+           end
+        end	    
       end
 
       -- Bookkeeping
@@ -805,6 +833,9 @@ function eval(data)
     local d = data[i]
     local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
     local batch_l, target_l, source_l = d[5], d[6], d[7]
+    if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
+      cutorch.setDevice(opt.gpuid)
+    end      
     local rnn_state_enc = reset_state(init_fwd_enc, batch_l)
     local context = context_proto[{{1, batch_l}, {1, source_l}}]
   -- forward prop encoder
@@ -813,7 +844,14 @@ function eval(data)
     local out = encoder_clones[1]:forward(encoder_input)
     rnn_state_enc = out
     context[{{},t}]:copy(out[#out])
-  end	 
+  end
+
+  if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
+    cutorch.setDevice(opt.gpuid2)
+    local context2 = context_proto2[{{1, batch_l}, {1, source_l}}]
+    context2:copy(context)
+    context = context2
+  end
 
   local rnn_state_dec = reset_state(init_fwd_dec, batch_l)
   if opt.init_dec == 1 then
@@ -837,14 +875,7 @@ function eval(data)
         rnn_state_dec[L*2+opt.input_feed]:add(rnn_state_enc[L*2])
       end
     end	 
-  end      	 	 
-
-  if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
-    cutorch.setDevice(opt.gpuid2)
-    local context2 = context_proto2[{{1, batch_l}, {1, source_l}}]
-    context2:copy(context)
-    context = context2
-  end      
+  end      	 	      
 
   local loss = 0
   for t = 1, target_l do
