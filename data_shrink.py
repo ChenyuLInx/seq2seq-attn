@@ -16,6 +16,7 @@ def main(arguments):
 	parser.add_argument('--srcoutputfile', help="Prefix of the output file names. ", type=str, required=True)
 	parser.add_argument('--targoutputfile', help="Prefix of the output file names. ", type=str, required=True)
 	parser.add_argument('--saveevery',help="save every #sentence",type = int,default=2)
+	parser.add_argument('--printevery',help="print every #sentence",type = int,default=100000)
 	args = parser.parse_args(arguments)
 	filesrc = open(args.srcoutputfile,"a")
 	filetarg = open(args.targoutputfile,"a")
@@ -23,6 +24,8 @@ def main(arguments):
 		if (int(n)%args.saveevery) == 0:
 			filesrc.write(src_orig)
 			filetarg.write(targ_orig)
+		if (int(n)%args.printevery) == 0:
+			print("finished {} sentences".format(n))
 	print("process finished")
 
 
