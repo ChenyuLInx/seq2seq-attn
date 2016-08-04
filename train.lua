@@ -405,14 +405,15 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
     local train_nonzeros_2 = 0
     local train_loss_2 = 0
     local train_loss = 0	       
-    local batch_order = torch.randperm(data.length) -- shuffle mini batch order     
+    local batch_order = torch.randperm(data.length) -- shuffle mini batch order
+    local batch_order_2 = torch.randperm(data_2.length)
     local start_time = timer:time().real
     local num_words_target = 0
     local num_words_source = 0
     local num_words_target_2 = 0
     local num_words_source_2 = 0
      
-    for i = 1, data:size() do
+    for i = 1, math.min(data:size(),data_2:size()) do
       --load data
       zero_table(grad_params, 'zero')
       local d
@@ -426,7 +427,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
         if epoch <= opt.curriculum then
           d_2 = data_2[i] 
         else
-          d_2 = data_2[batch_order[i]]
+          d_2 = data_2[batch_order_2[i]]
         end
       end
       local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
@@ -948,7 +949,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
      local score = eval(valid_data)
      local score_2 
      if opt.joint == 1 then
-      score_2 = eval(valid_data_2)
+      score_2 = eval_2(valid_data_2)
      end
      --=============
      opt.val_perf[#opt.val_perf + 1] = score
