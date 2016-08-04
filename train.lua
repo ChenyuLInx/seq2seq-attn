@@ -313,7 +313,14 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
     	encoder_grad_proto = encoder_grad_proto:cuda()
     	if opt.brnn == 1 then
     	   encoder_bwd_grad_proto = encoder_bwd_grad_proto:cuda()
-    	end	 
+    	end
+      if opt.joint == 1 then
+        encoder_2_grad_proto = encoder_2_grad_proto:cuda()
+        if opt.brnn == 1 then
+          encoder_2_bwd_grad_proto = encoder_2_bwd_grad_proto:cuda()
+        end
+        context_proto3 = context_proto3:cuda()
+      end
     end
   end
   -- these are initial states of encoder/decoder for fwd/bwd steps
@@ -406,7 +413,9 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
     local train_loss_2 = 0
     local train_loss = 0	       
     local batch_order = torch.randperm(data.length) -- shuffle mini batch order
-    local batch_order_2 = torch.randperm(data_2.length)
+    if opt.joint == 1 then
+      batch_order_2 = torch.randperm(data_2.length)
+    end
     local start_time = timer:time().real
     local num_words_target = 0
     local num_words_source = 0
