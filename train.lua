@@ -442,6 +442,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
           d_2 = data_2[i] 
         else
           d_2 = data_2[batch_order_2[i]]
+          -- d_2 = data_2[i]
         end
       end
       local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
@@ -907,6 +908,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
       	local param_norm = 0
         local param_norm_2 = 0
       	local shrinkage = opt.max_grad_norm / grad_norm
+        local shrinkage_2
         if opt.joint == 1 then
           shrinkage_2 = opt.max_grad_norm / grad_norm_2
         end
@@ -1023,8 +1025,8 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             end
       	   local stats = string.format('Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, ',
       					epoch, i, data:size(), batch_l, opt.learning_rate)
-      	   stats = stats .. string.format('PPL: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
-      				  math.exp(loss_for_pll/nonzeros_for_pll), param_norm, grad_norm)
+      	   stats = stats .. string.format('PPL: %.2f, Loss: %.2f, Nonzeros: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
+      				  math.exp(loss_for_pll/nonzeros_for_pll), loss_for_pll, nonzeros_for_pll, param_norm, grad_norm)
       	   stats = stats .. string.format('Training: %d/%d/%d total/source/target tokens/sec',
       					   (num_words_target+num_words_source) / time_taken,
       					   num_words_source / time_taken,
@@ -1034,8 +1036,8 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             if opt.joint == 1 then 
               local stats = string.format('Joint Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, ',
                 epoch, i, data:size(), batch_l_2, opt.learning_rate)
-               stats = stats .. string.format('PPL: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
-                    math.exp(loss_2_for_pll/nonzeros_2_for_pll), param_norm_2, grad_norm_2)
+               stats = stats .. string.format('PPL: %.2f, Loss: %.2f, Nonzeros: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
+                    math.exp(loss_2_for_pll/nonzeros_2_for_pll), loss_2_for_pll, nonzeros_2_for_pll, param_norm_2, grad_norm_2)
                stats = stats .. string.format('Training: %d/%d/%d total/source/target tokens/sec',
                        (num_words_target_2+num_words_source_2) / time_taken,
                        num_words_source_2 / time_taken,
@@ -1402,7 +1404,7 @@ function main()
     if opt.joint == 1 then
       encoder_2 = make_lstm(valid_data_2, opt, 'enc', opt.use_chars_enc)
       decoder_2 = make_lstm(valid_data_2, opt, 'dec', opt.use_chars_enc)
-      generator_2, _ = make_generator(valid_data, opt)
+      generator_2, _ = make_generator(valid_data_2, opt)
     end      
   else
     assert(path.exists(opt.train_from), 'checkpoint path invalid')
@@ -1438,6 +1440,7 @@ function main()
     table.insert(layers,decoder_2)
     table.insert(layers,generator_2)
   end
+
 
 
   if opt.optim ~= 'sgd' then
