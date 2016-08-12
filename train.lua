@@ -28,6 +28,7 @@ cmd:option('-num_shards', 0, [[If the training data has been broken up into diff
                              then training files are in this many partitions]])
 cmd:option('-train_from', '', [[If training from a checkpoint then this is the path to the
                                 pretrained model.]])
+cmd:option('-Y', 0, [[If this equals 1, then use one encoder and two decoders to train the nerel network]])
 
 -- rnn model specs
 cmd:text("")
@@ -91,11 +92,16 @@ cmd:option('-optim', 'sgd', [[Optimization method. Possible options are:
 cmd:option('-learning_rate', 1, [[Starting learning rate. If adagrad/adadelta/adam is used, 
                                 then this is the global learning rate. Recommended settings: sgd =1,
                                 adagrad = 0.1, adadelta = 1, adam = 0.1]])
+cmd:option('-learning_rate_2', 0.5, [[Starting learning rate. If adagrad/adadelta/adam is used, 
+                                then this is the global learning rate. Recommended settings: sgd =1,
+                                adagrad = 0.1, adadelta = 1, adam = 0.1]])
 cmd:option('-max_grad_norm', 5, [[If the norm of the gradient vector exceeds this renormalize it
                                to have the norm equal to max_grad_norm]])
 cmd:option('-dropout', 0.3, [[Dropout probability. 
                             Dropout is applied between vertical LSTM stacks.]])
 cmd:option('-lr_decay', 0.5, [[Decay learning rate by this much if (i) perplexity does not decrease
+                      on the validation set or (ii) epoch has gone past the start_decay_at_limit]])
+cmd:option('-lr_decay_2', 0.1, [[Decay learning rate by this much if (i) perplexity does not decrease
                       on the validation set or (ii) epoch has gone past the start_decay_at_limit]])
 cmd:option('-start_decay_at', 9, [[Start decay after this epoch]])
 cmd:option('-curriculum', 0, [[For this many epochs, order the minibatches based on source
@@ -160,7 +166,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
   --(self) TODO change this when need second GPU
   for i = 1, #layers do
     if opt.gpuid2 >= 0 then
-      if i == 1 then
+      if i == 1 or (opt.joint == 1 and i == 4)then
         cutorch.setDevice(opt.gpuid)
       else
         cutorch.setDevice(opt.gpuid2)
@@ -199,12 +205,18 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
      end            
   end
   print("Number of parameters: " .. num_params)
-  --(self) TODO change this for second GPU
+
   if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
      cutorch.setDevice(opt.gpuid)
      word_vec_layers[1].weight[1]:zero()
+     if opt.joint == 1 then
+       word_vec_layers[3].weight[1]:zero()
+     end
      cutorch.setDevice(opt.gpuid2)
      word_vec_layers[2].weight[1]:zero()
+     if opt.joint == 1 then
+       word_vec_layers[4].weight[1]:zero()
+     end
   else
      word_vec_layers[1].weight[1]:zero()            
      word_vec_layers[2].weight[1]:zero()
@@ -289,22 +301,22 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
     cutorch.setDevice(opt.gpuid)                        
     if opt.gpuid2 >= 0 then
     	encoder_grad_proto2 = encoder_grad_proto2:cuda()
-    	encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
+    	-- encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
     	context_proto = context_proto:cuda()
        --(JOINT) set those things on gpu1
       if opt.joint == 1 then
         encoder_2_grad_proto2 = encoder_2_grad_proto2:cuda()
-        encoder_2_bwd_grad_proto2 = encoder_2_bwd_grad_proto2:cuda()
+        -- encoder_2_bwd_grad_proto2 = encoder_2_bwd_grad_proto2:cuda()
         context_proto3= context_proto3:cuda()
       end 	 
     	cutorch.setDevice(opt.gpuid2)
     	encoder_grad_proto = encoder_grad_proto:cuda()
-    	encoder_bwd_grad_proto = encoder_bwd_grad_proto:cuda()
+    	-- encoder_bwd_grad_proto = encoder_bwd_grad_proto:cuda()
     	context_proto2 = context_proto2:cuda()
       --(joint) Set those things on gpu2
       if opt.joint == 1 then
         encoder_2_grad_proto = encoder_2_grad_proto:cuda()
-        encoder_2_bwd_grad_proto = encoder_2_bwd_grad_proto:cuda()
+        -- encoder_2_bwd_grad_proto = encoder_2_bwd_grad_proto:cuda()
         context_proto4 = context_proto4:cuda()
       end
     	cutorch.setDevice(opt.gpuid)	 
@@ -347,7 +359,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
      table.insert(init_fwd_dec, h_init:clone()) 
      table.insert(init_bwd_dec, h_init:clone())
      table.insert(init_bwd_dec, h_init:clone())
-  end         
+  end
   
   dec_offset = 3 -- offset depends on input feeding
   if opt.input_feed == 1 then
@@ -406,7 +418,12 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
        if start_decay == 1 then
   	opt.learning_rate = opt.learning_rate * opt.lr_decay
        end
+  end
+
+  function decay_lr_2(epoch)
+         opt.learning_rate_2 = opt.learning_rate_2 * opt.lr_decay_2
   end   
+
   function train_batch(data, epoch, data_2)
     local train_nonzeros = 0
     local train_nonzeros_2 = 0
@@ -961,8 +978,13 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
               adam_step(params[j], grad_params[j], layer_etas[j], optStates[j]) 
               adam_step(params[j+3], grad_params[j+3], layer_etas[j], optStates[j])        
             else
-              params[j]:add(grad_params[j]:mul(-opt.learning_rate))    
-              params[j+3]:add(grad_params[j+3]:mul(-opt.learning_rate))   
+              if joint_train == 1 then
+                params[j]:add(grad_params[j]:mul(-opt.learning_rate))    
+                params[j+3]:add(grad_params[j+3]:mul(-opt.learning_rate))   
+              else
+                params[j]:add(grad_params[j]:mul(-opt.learning_rate_2))    
+                params[j+3]:add(grad_params[j+3]:mul(-opt.learning_rate_2))
+              end
             end     
             param_norm = param_norm + params[j]:norm()^2
             param_norm_2 = param_norm_2 + params[j+3]:norm()^2
@@ -1034,8 +1056,8 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             print(stats)
             --(Joint)
             if opt.joint == 1 then 
-              local stats = string.format('Joint Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, ',
-                epoch, i, data:size(), batch_l_2, opt.learning_rate)
+              local stats = string.format('Joint Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, LR_2: %.4f ',
+                epoch, i, data:size(), batch_l_2, opt.learning_rate, opt.learning_rate_2)
                stats = stats .. string.format('PPL: %.2f, Loss: %.2f, Nonzeros: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
                     math.exp(loss_2_for_pll/nonzeros_2_for_pll), loss_2_for_pll, nonzeros_2_for_pll, param_norm_2, grad_norm_2)
                stats = stats .. string.format('Training: %d/%d/%d total/source/target tokens/sec',
@@ -1107,32 +1129,44 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
        opt.val_perf[#opt.val_perf + 1] = score
        if opt.optim == 'sgd' then --only decay with SGD
   	     decay_lr(epoch)
+         if opt.joint == 1 then
+          decay_lr_2(epoch)
+        end
        end      
        -- clean and save models
        local savefile = string.format('%s_epoch%.2f_%.2f.t7', opt.savefile, epoch, score)
        local savafile_2
        if opt.joint == 1 then
         savefile_2 = string.format('%s_epoch%.2f_%.2f_joint.t7', opt.savefile, epoch, score)
-       end     
+       end
        if epoch % opt.save_every == 0 then
           print('saving checkpoint to ' .. savefile)
         	clean_layer(generator)
-        	if opt.brnn == 0 then
-        	   torch.save(savefile, {{encoder, decoder, generator}, opt})
-        	else
-        	   torch.save(savefile, {{encoder, decoder, generator, encoder_bwd}, opt})
-        	end
+          if opt.joint == 1 then
+            torch.save(savefile, {{encoder, decoder, generator, encoder_2, decoder_2, generator_2}, opt})
+          else
+          	if opt.brnn == 0 then
+          	   torch.save(savefile, {{encoder, decoder, generator}, opt})
+          	else
+          	   torch.save(savefile, {{encoder, decoder, generator, encoder_bwd}, opt})
+          	end
+          end
        end      
     end
     -- save final model
     local savefile = string.format('%s_final.t7', opt.savefile)
     clean_layer(generator)
     print('saving final model to ' .. savefile)
-    if opt.brnn == 0 then
-       torch.save(savefile, {{encoder:double(), decoder:double(), generator:double()}, opt})
-    else
-       torch.save(savefile, {{encoder:double(), decoder:double(), generator:double(),
-  			     encoder_bwd:double()}, opt})
+    if opt.joint == 1 then
+      torch.save(savefile, {{encoder:double(), decoder:double(), generator:double(),
+          encoder_2:double(), decoder_2:double(), generator_2:double(),}, opt})
+    else 
+      if opt.brnn == 0 then
+         torch.save(savefile, {{encoder:double(), decoder:double(), generator:double()}, opt})
+      else
+         torch.save(savefile, {{encoder:double(), decoder:double(), generator:double(),
+    			     encoder_bwd:double()}, opt})
+      end
     end
   end
    
@@ -1454,7 +1488,7 @@ function main()
   --GPU setup code, do not need to modifiy for single gpu
   if opt.gpuid >= 0 then
      for i = 1, #layers do	 
-	if opt.gpuid2 >= 0 then 
+	if opt.gpuid2 >= 0 then
 	   if i == 1 or i == 4 then
 	      cutorch.setDevice(opt.gpuid) --encoder on gpu1
 	   else
