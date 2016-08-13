@@ -143,7 +143,7 @@ torch.manualSeed(opt.seed)
 function zero_table(t)
    for i = 1, #t do
       if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
-	 if i == 1 then
+	 if i == 1 or (opt.joint == 1 and i == 4) then
 	    cutorch.setDevice(opt.gpuid)
 	 else
 	    cutorch.setDevice(opt.gpuid2)
@@ -470,17 +470,17 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
         target_2, target_out_2, nonzeros_2, source_2 = d_2[1], d_2[2], d_2[3], d_2[4]
         batch_l_2, target_l_2, source_l_2 = d_2[5], d_2[6], d_2[7]
       end
-      local encoder_grads = encoder_grad_proto[{{1, batch_l}, {1, source_l}}]
-      if opt.joint == 1 then
-        encoder_2_grads = encoder_2_grad_proto[{{1, batch_l_2}, {1, source_l_2}}]
-      end
+      for joint_train = 1, 2 do
+	if opt.joint == 0 and joint_train == 2 then break end
+      	local encoder_grads = encoder_grad_proto[{{1, batch_l}, {1, source_l}}]
+      	local encoder_2_grads
+      	if opt.joint == 1 then
+       	 encoder_2_grads = encoder_2_grad_proto[{{1, batch_l_2}, {1, source_l_2}}]
+      	end
     	local encoder_bwd_grads 
     	if opt.brnn == 1 then
     	   encoder_bwd_grads = encoder_bwd_grad_proto[{{1, batch_l}, {1, source_l}}]
-    	end
- 
-      for joint_train = 1, 2 do
-        if opt.joint == 0 and joint_train == 2 then break end 
+    	end 
         local dec_batch_l
         local dec_2_batch_l
         if joint_train == 1 then
@@ -532,7 +532,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
   	
       	if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
       	  cutorch.setDevice(opt.gpuid2)	    
-      	  local context2 = context_proto2[{{1, batch_l_2}, {1, source_l}}]
+      	  local context2 = context_proto2[{{1, batch_l}, {1, source_l}}]
           if opt.joint == 1 then
             context2_joint = context_proto4[{{1, batch_l_2}, {1, source_l_2}}]
           end
@@ -584,12 +584,16 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
       	local decoder_input
         local dec_iter
         local dec_2_iter
-        if joint_train == 1 then
+	local source_2_copy
+        local source_copy
+	if joint_train == 1 then
           dec_iter = target_l
           dec_2_iter = target_l_2
         else
           dec_iter = source_l_2
           dec_2_iter = source_l
+	  source_2_copy = source_2:clone()
+	  source_copy = source:clone()
         end
       	for t = 1, dec_iter do
           decoder_clones[t]:training()
@@ -602,9 +606,9 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             end
           else
             if opt.attn == 1 then
-              decoder_input = {source_2[t], context_joint, table.unpack(rnn_state_dec[t-1])}
+              decoder_input = {source_2_copy[t], context_joint, table.unpack(rnn_state_dec[t-1])}
             else
-              decoder_input = {source_2[t], context_joint[{{}, source_l_2}], table.unpack(rnn_state_dec[t-1])}
+              decoder_input = {source_2_copy[t], context_joint[{{}, source_l_2}], table.unpack(rnn_state_dec[t-1])}
             end
           end
           local out = decoder_clones[t]:forward(decoder_input)
@@ -630,9 +634,9 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
               end
             else
               if opt.attn == 1 then
-                decoder_input = {source[t], context, table.unpack(rnn_state_dec_2[t-1])}
+                decoder_input = {source_copy[t], context, table.unpack(rnn_state_dec_2[t-1])}
               else
-                decoder_input = {source[t], context[{{}, source_l}], table.unpack(rnn_state_dec_2[t-1])}
+                decoder_input = {source_copy[t], context[{{}, source_l}], table.unpack(rnn_state_dec_2[t-1])}
               end
             end
             local out = decoder_2_clones[t]:forward(decoder_input)
@@ -647,7 +651,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             rnn_state_dec_2[t] = next_state
           end
         end
-      	-- backward prop decoder
+      	-- backward prop decoder 
       	encoder_grads:zero()
         if opt.joint == 1 then
           encoder_2_grads:zero()
@@ -667,8 +671,8 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
             loss = loss + criterion:forward(pred, target_out[t])/dec_batch_l
             dl_dpred = criterion:backward(pred, target_out[t])
           else
-            loss = loss + criterion:forward(pred, source_2[t])/dec_batch_l
-            dl_dpred = criterion:backward(pred, source_2[t])
+            loss = loss + criterion:forward(pred, source_2_copy[t])/dec_batch_l
+            dl_dpred = criterion:backward(pred, source_2_copy[t])
           end
           dl_dpred:div(dec_batch_l)
           local dl_dtarget = generator:backward(preds[t], dl_dpred)
@@ -725,8 +729,8 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
               loss_2 = loss_2 + criterion:forward(pred_2, target_out_2[t])/dec_2_batch_l
               dl_dpred = criterion:backward(pred_2, target_out_2[t])
             else
-              loss_2 = loss_2 + criterion:forward(pred_2, source[t])/dec_2_batch_l
-              dl_dpred = criterion:backward(pred_2, source[t])
+              loss_2 = loss_2 + criterion:forward(pred_2, source_copy[t])/dec_2_batch_l
+              dl_dpred = criterion:backward(pred_2, source_copy[t])
             end
             dl_dpred:div(dec_2_batch_l)
             local dl_dtarget = generator_2:backward(preds_2[t], dl_dpred)
@@ -807,7 +811,7 @@ function train(train_data, valid_data,train_data_2,valid_data_2)
            if opt.joint == 1 then
             encoder_2_grads2 = encoder_2_grad_proto2[{{1, batch_l_2}, {1, source_l_2}}]
             encoder_2_grads2:zero()
-            encode_2_grads2:copy(encoder_2_grads)
+            encoder_2_grads2:copy(encoder_2_grads)
             encoder_2_grads = encoder_2_grads2 -- batch_l_2 x source_l_2 x rnn_size
            end
       	end
