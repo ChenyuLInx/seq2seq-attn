@@ -3,6 +3,13 @@
 *.t7
 *.dict
 
+#data files
+alldata/
+cl350@dscr-slogin-02.oit.duke.edu/
+data/1M/
+data/2M/
+hdf5data/
+
 # Compiled Lua sources
 luac.out
 
