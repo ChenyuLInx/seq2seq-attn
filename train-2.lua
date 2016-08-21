@@ -537,13 +537,14 @@ function train(train_data, valid_data)
         drnn_state_dec[j-dec_offset+1]:copy(dlst[j])
       end
     end
-    word_vec_layers[2].gradWeight[1]:zero()
+    
+    word_vec_layers[2 + (decoder_idx - 1)*2].gradWeight[1]:zero()
     if opt.fix_word_vecs_dec == 1 then
-      word_vec_layers[2].gradWeight:zero()
+      word_vec_layers[2 + (decoder_idx - 1)*2].gradWeight:zero()
     end
 
     local grad_norm = 0
-    grad_norm = grad_norm + grad_params[2]:norm()^2 + grad_params[3]:norm()^2
+    grad_norm = grad_norm + grad_params[2 + (decoder_idx - 1)*3]:norm()^2 + grad_params[3 + (decoder_idx - 1)*3]:norm()^2
 
     -- backward prop encoder
     if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
@@ -601,12 +602,12 @@ function train(train_data, valid_data)
       end
     end
 
-    word_vec_layers[1].gradWeight[1]:zero()
+    word_vec_layers[1 + (encoder_idx - 1)*2].gradWeight[1]:zero()
     if opt.fix_word_vecs_enc == 1 then
-      word_vec_layers[1].gradWeight:zero()
+      word_vec_layers[1 + (encoder_idx - 1)*2].gradWeight:zero()
     end
 
-    grad_norm = grad_norm + grad_params[1]:norm()^2
+    grad_norm = grad_norm + grad_params[1 + (encoder_idx - 1)*3]:norm()^2
     if opt.brnn == 1 then
       grad_norm = grad_norm + grad_params[4]:norm()^2
     end
@@ -622,7 +623,11 @@ function train(train_data, valid_data)
     -- Shrink norm and update params
     local param_norm = 0
     local shrinkage = opt.max_grad_norm / grad_norm
-    for j = 1, #grad_params do
+    local update_idx = #grad_params
+    if opt.joint == 1 then
+      update_idx = 3
+    end
+    for j = 1, update_idx do
       if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
         if j == 1 then
           cutorch.setDevice(opt.gpuid)
@@ -631,7 +636,15 @@ function train(train_data, valid_data)
         end
       end
       if shrinkage < 1 then
-        grad_params[j]:mul(shrinkage)
+	if opt.joint == 1 then
+          if j == 1 then
+            grad_params[j + (encoder_idx - 1)*3]:mul(shrinkage)
+          else
+            grad_params[j + (decoder_idx - 1)*3]:mul(shrinkage)
+          end
+        else
+          grad_params[j]:mul(shrinkage)
+        end
       end
       if opt.optim == 'adagrad' then
         adagrad_step(params[j], grad_params[j], layer_etas[j], optStates[j])
@@ -640,9 +653,25 @@ function train(train_data, valid_data)
       elseif opt.optim == 'adam' then
         adam_step(params[j], grad_params[j], layer_etas[j], optStates[j])
       else
-        params[j]:add(grad_params[j]:mul(-opt.learning_rate))
+        if opt.joint == 1 then
+          if j == 1 then
+            params[j + (encoder_idx - 1)*3]:add(grad_params[j + (encoder_idx - 1)*3]:mul(-opt.learning_rate))
+          else
+            params[j + (decoder_idx - 1)*3]:add(grad_params[j + (decoder_idx - 1)*3]:mul(-opt.learning_rate))
+          end
+        else
+          params[j]:add(grad_params[j]:mul(-opt.learning_rate))
+        end
       end
-      param_norm = param_norm + params[j]:norm()^2
+      if opt.joint == 1 then
+        if j == 1 then
+          param_norm = param_norm + params[j + (encoder_idx - 1)*3]:norm()^2
+        else
+          param_norm = param_norm + params[j + (decoder_idx - 1)*3]:norm()^2
+        end
+      else
+        param_norm = param_norm + params[j]:norm()^2
+      end
     end
     param_norm = param_norm^0.5
     if opt.brnn == 1 then
@@ -734,7 +763,7 @@ function train(train_data, valid_data)
       local num_words_source_3 = 0
       local num_words_target_4 = 0
       local num_words_source_4 = 0
-      for i = 1, train_data:size() do
+      for i = 1, math.min(train_data:size(), train_data_2:size()) do
         local d
         if epoch <= opt.curriculum then
           d = train_data[i]
@@ -743,7 +772,9 @@ function train(train_data, valid_data)
         end
         encoder_idx = 1
         decoder_idx = 1
-        print ('first model specs')
+        if i%opt.print_every == 0 then 
+          print ('first model specs')
+        end
         train_loss, train_nonzeros, num_words_target, num_words_source = train_batch(d, i, encoder_idx, decoder_idx, epoch, train_loss, train_nonzeros, num_words_target, num_words_source, start_time)
         if opt.joint == 1 then
           encoder_idx = 2
@@ -754,7 +785,9 @@ function train(train_data, valid_data)
           else
             d_2 = train_data_2[batch_order_2[i]]
           end
-          print ('second model specs')
+          if i%opt.print_every == 0 then
+            print ('second model specs')
+          end
           train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2 = train_batch(d_2, i, encoder_idx, decoder_idx, epoch, train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2, start_time)
           -- when doing joint train, train a en-en 
           if i%opt.std_iter == 0 then
@@ -767,12 +800,16 @@ function train(train_data, valid_data)
               encoder_idx = 1
               decoder_idx = 2
               local d_3 = train_data[batch_order_3[j]]
-              print ('joint 1 (speed might be off)')
+              if j%opt.print_every == 0 then 
+                print ('joint 1 (speed might be off)')
+              end
               train_loss_3, train_nonzeros_3, num_words_target_3, num_words_source_3 = train_batch(d_3, j, encoder_idx, decoder_idx, epoch, train_loss_3, train_nonzeros_3, num_words_target_3, num_words_source_3, start_time_2)
               encoder_idx = 2
               decoder_idx = 1
               local d_4 = train_data_2[batch_order_4[j]]
-              print ('joint 2 (speed might be off)')
+              if j%opt.print_every == 0 then
+                print ('joint 2 (speed might be off)')
+              end
               train_loss_4, train_nonzeros_4, num_words_target_4, num_words_source_4 = train_batch(d_4, j, encoder_idx, decoder_idx, epoch, train_loss_4, train_nonzeros_4, num_words_target_4, num_words_source_4, start_time_2)
             end
           end
@@ -781,6 +818,10 @@ function train(train_data, valid_data)
 
       total_loss = train_loss
       total_nonzeros = train_nonzeros
+      if opt.joint == 1 then
+        total_loss_2 = train_loss_2
+        total_nonzeros_2 = train_nonzeros_2
+      end
     end
     local train_score = math.exp(total_loss/total_nonzeros)
     local train_score_2
@@ -794,7 +835,7 @@ function train(train_data, valid_data)
     local score = eval(valid_data, 1)
     local score_2
     if opt.joint == 1 then
-      score_2 = eval_2(valid_data_2, 2)
+      score_2 = eval(valid_data_2, 2)
     end
     opt.val_perf[#opt.val_perf + 1] = score
     if opt.optim == 'sgd' then --only decay with SGD
