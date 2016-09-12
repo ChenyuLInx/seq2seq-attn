@@ -23,11 +23,17 @@ cmd:option('-num_shards', 0, [[If the training data has been broken up into diff
                              then training files are in this many partitions]])
 cmd:option('-train_from', '', [[If training from a checkpoint then this is the path to the pretrained model.]])
 
+--CCA specs
+cmd:option('-rcov1', 0, [[rcov1 for CCA]])
+cmd:option('-rcov2', 0, [[rcov2 for CCA]])
+cmd:option('-cca_k', 0, [[K for CCA]])
+
 -- rnn model specs
 cmd:text("")
 cmd:text("**Model options**")
 cmd:text("")
 
+cmd:option('-test1', 0, [[if test1 == 1, will not train the second model in supervised way ]])
 cmd:option('-joint', 0, [[joint equals 1 means train model jointly ]])
 cmd:option('-mix_ratio', 0.5, [[ratio of joint and orginal model ]])
 cmd:option('-std_iter', 10, [[iteration for standerd task]])
@@ -216,6 +222,9 @@ function train(train_data, valid_data)
   encoder_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
   encoder_bwd_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
   context_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  if opt.cca == 1 then
+    context_proto_cca = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
+  end
   -- need more copies of the above if using two gpus
   if opt.gpuid2 >= 0 then
     encoder_grad_proto2 = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size)
@@ -281,6 +290,9 @@ function train(train_data, valid_data)
   if opt.gpuid >= 0 then
     h_init = h_init:cuda()
     cutorch.setDevice(opt.gpuid)
+    if opt.cca == 1 then
+      context_proto_cca = context_proto_cca:cuda()
+    end
     if opt.gpuid2 >= 0 then
       encoder_grad_proto2 = encoder_grad_proto2:cuda()
       encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
@@ -304,12 +316,20 @@ function train(train_data, valid_data)
   init_bwd_enc = {}
   init_fwd_dec = {}
   init_bwd_dec = {}
+  init_fwd_enc_cca = {}
+  init_bwd_enc_cca = {}
 
   for L = 1, opt.num_layers do
     table.insert(init_fwd_enc, h_init:clone())
     table.insert(init_fwd_enc, h_init:clone())
     table.insert(init_bwd_enc, h_init:clone())
     table.insert(init_bwd_enc, h_init:clone())
+    if opt.cca == 1 then
+      table.insert(init_fwd_enc_cca, h_init:clone())
+      table.insert(init_fwd_enc_cca, h_init:clone())
+      table.insert(init_bwd_enc_cca, h_init:clone())
+      table.insert(init_bwd_enc_cca, h_init:clone())
+    end
   end
   if opt.gpuid2 >= 0 then
     cutorch.setDevice(opt.gpuid2)
@@ -700,10 +720,108 @@ function train(train_data, valid_data)
         num_words_target / time_taken)
       print(stats)
     end
-    if i % 200 == 0 then
+    if i % 50 == 0 then
       collectgarbage()
     end
     return train_loss, train_nonzeros, num_words_target, num_words_source
+  end
+
+  function train_cca(d, epoch, i)
+    local start_time = timer:time().real
+    zero_table(grad_params, 'zero')
+    local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
+    local batch_l, target_l, source_l = d[5], d[6], d[7]
+    if opt.gpuid >= 0 then
+      cutorch.setDevice(opt.gpuid)
+    end
+    local target_cca = target:clone()
+    local rnn_state_enc = reset_state(init_fwd_enc, batch_l, 0)
+    local context = context_proto[{{1, batch_l}, {1, source_l}}]
+    -- forward prop encoder
+    for t = 1, source_l do
+      encoder_clones[1][t]:training()
+      local encoder_input = {source[t], table.unpack(rnn_state_enc[t-1])}
+      local out = encoder_clones[1][t]:forward(encoder_input)
+      rnn_state_enc[t] = out
+      context[{{},t}]:copy(out[#out])
+    end
+    local rnn_state_enc_cca = reset_state(init_fwd_enc_cca, batch_l, 0)
+    local context_cca = context_proto_cca[{{1, batch_l}, {1, target_l}}]
+    for t = 1, target_l do
+      encoder_clones[2][t]:trainning()
+      local encoder_input = {target_cca[t],table.unpack(rnn_state_enc_cca[t-1])}
+      local out = encoder_clones[2][t]:forward(encoder_input)
+      rnn_state_enc_cca[t] = out
+      context_cca[{{},t}]:copy(out[#out])
+    end
+    local corrl = CCA_model:forward({context[{{},source_l}], context_cca[{{}, target_l}]})
+    local dDCCA = CCA_model:backward({context[{{},source_l}], context_cca[{{}, target_l}]})
+    --copy the last state of encoder for back-prop
+    local drnn_state_enc = reset_state(init_bwd_enc, batch_l)
+    local drnn_state_enc_cca = reset_state(init_bwd_enc_cca, batch_l)
+    for L = 1, opt.num_layers do
+      drnn_state_enc[L*2-1]:copy(rnn_state_enc[source_l][L*2-1])
+      drnn_state_enc[L*2]:copy(rnn_state_enc[source_l][L*2])
+      drnn_state_enc_cca[L*2-1]:copy(rnn_state_enc_cca[source_l][L*2-1])
+      drnn_state_enc_cca[L*2]:copy(rnn_state_enc_cca[source_l][L*2])
+    end
+    --back-prop encoder1
+    for t = source_l, 1, -1 do
+      local encoder_input = {source[t], table.unpack(rnn_state_enc[t-1])}
+      if t == source_l then
+        drnn_state_enc[#drnn_state_enc]:add(dDCCA[1])
+      end
+      local dlst = encoder_clones[1][t]:backward(encoder_input, drnn_state_enc)
+      for j = 1, #drnn_state_enc do
+        drnn_state_enc[j]:copy(dlst[j+1])
+      end
+    end
+    --back-prop encoder2
+    for t = target_l, 1, -1 do
+      local encoder_input = {target_cca[t], table.unpack(rnn_state_enc_cca[t-1])}
+      if t == source_l then
+        drnn_state_enc_cca[#drnn_state_enc_cca]:add(dDCCA[2])
+      end
+      local dlst = encoder_clones[2][t]:backward(encoder_input, drnn_state_enc_cca)
+      for j = 1, #drnn_state_enc do
+        drnn_state_enc_cca[j]:copy(dlst[j+1])
+      end
+    end
+
+    word_vec_layers[1].gradWeight[1]:zero()
+    word_vec_layers[3].gradWeight[1]:zero()
+    local grad_norm = 0
+    grad_norm = grad_norm + grad_params[1]:norm()^2 + grad_params[4]:norm()^2
+    grad_norm = grad_norm^0.5
+    -- Shrink norm and update params
+    local param_norm = 0
+    local shrinkage = opt.max_grad_norm / grad_norm*2
+    if shrinkage < 1 then
+      grad_params[1]:mul(shrinkage)
+      grad_params[4]:mul(shrinkage)
+    end
+    if opt.optim == 'adagrad' then
+      adagrad_step(params[1], grad_params[1], layer_etas[1], optStates[1])
+      adagrad_step(params[4], grad_params[4], layer_etas[4], optStates[4])
+    elseif opt.optim == 'adadelta' then
+      adadelta_step(params[1], grad_params[1], layer_etas[1], optStates[1])
+      adadelta_step(params[4], grad_params[4], layer_etas[4], optStates[4])
+    elseif opt.optim == 'adam' then
+      adam_step(params[1], grad_params[1], layer_etas[1], optStates[1])
+      adam_step(params[4], grad_params[4], layer_etas[4], optStates[4])
+    else
+      params[1]:add(grad_params[1]:mul(-opt.learning_rate))
+      params[4]:add(grad_params[4]:mul(-opt.learning_rate))
+    end
+    if i%opt.print_every == 0 then
+      local time_taken = timer:time().real - start_time
+      local num_words_target = batch_l*target_l
+      local num_words_source = batch_l*source_l
+      local stats = string.format('Training: %d/%d/%d total/source/target tokens/sec',
+        (num_words_target+num_words_source) / time_taken,
+        num_words_source / time_taken,
+        num_words_target / time_taken)
+    end
   end
 
   function train_epoch(data, epoch)
@@ -763,7 +881,11 @@ function train(train_data, valid_data)
       local num_words_source_3 = 0
       local num_words_target_4 = 0
       local num_words_source_4 = 0
-      for i = 1, math.min(train_data:size(), train_data_2:size()) do
+      local data_size = train_data:size()
+      if opt.joint == 1 then
+        data_size = math.min(train_data:size(), train_data_2:size())
+      end
+      for i = 1, data_size do
         local d
         if epoch <= opt.curriculum then
           d = train_data[i]
@@ -777,18 +899,32 @@ function train(train_data, valid_data)
         end
         train_loss, train_nonzeros, num_words_target, num_words_source = train_batch(d, i, encoder_idx, decoder_idx, epoch, train_loss, train_nonzeros, num_words_target, num_words_source, start_time)
         if opt.joint == 1 then
-          encoder_idx = 2
-          decoder_idx = 2
-          local d_2
-          if epoch <= opt.curriculum then
-            d_2 = train_data_2[i]
-          else
-            d_2 = train_data_2[batch_order_2[i]]
+          if opt.test1 == 0 then
+            encoder_idx = 2
+            decoder_idx = 2
+            local d_2
+            if epoch <= opt.curriculum then
+              d_2 = train_data_2[i]
+            else
+              d_2 = train_data_2[batch_order_2[i]]
+            end
+            if i%opt.print_every == 0 then
+              print ('second model specs')
+            end
+            train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2 = train_batch(d_2, i, encoder_idx, decoder_idx, epoch, train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2, start_time)
           end
-          if i%opt.print_every == 0 then
-            print ('second model specs')
+          -- add CCA here for the time being
+          if opt.cca == 1 then
+            if i%opt.std_iter == 0 then
+              local cca_idx = 0
+              local batch_order_cca = torch.randperm(train_data.length)
+              for j = 1,opt.std_iter*opt.mix_ratio do
+                local d_cca = train_data[batch_order_cca[j]]
+                train_cca(d_cca,epoch, i)
+              end
+            end
           end
-          train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2 = train_batch(d_2, i, encoder_idx, decoder_idx, epoch, train_loss_2, train_nonzeros_2, num_words_target_2, num_words_source_2, start_time)
+
           -- when doing joint train, train a en-en 
           if i%opt.std_iter == 0 then
             start_time_2 = timer:time().real
@@ -818,7 +954,7 @@ function train(train_data, valid_data)
 
       total_loss = train_loss
       total_nonzeros = train_nonzeros
-      if opt.joint == 1 then
+      if opt.joint == 1 and opt.test1 == 0 then
         total_loss_2 = train_loss_2
         total_nonzeros_2 = train_nonzeros_2
       end
@@ -826,7 +962,7 @@ function train(train_data, valid_data)
     local train_score = math.exp(total_loss/total_nonzeros)
     local train_score_2
     print('Train', train_score)
-    if opt.joint == 1 then
+    if opt.joint == 1 and opt.test1 == 0 then
       train_score_2 = math.exp(total_loss_2/total_nonzeros_2)
       print('Joint Train', train_score_2)
       opt.train_perf_2[#opt.train_perf_2 + 1] = train_score_2
@@ -834,7 +970,7 @@ function train(train_data, valid_data)
     opt.train_perf[#opt.train_perf + 1] = train_score
     local score = eval(valid_data, 1)
     local score_2
-    if opt.joint == 1 then
+    if opt.joint == 1 and opt.test1 == 0 then
       score_2 = eval(valid_data_2, 2)
     end
     opt.val_perf[#opt.val_perf + 1] = score
@@ -1084,6 +1220,12 @@ function main()
     end
     _, criterion = make_generator(valid_data, opt)
   end
+
+  local CCA_opt
+  CCA_opt.rcov1 = opt.rcov1
+  CCA_opt.rcov2 = opt.rcov2
+  CCA_opt.k = opt.cca_k
+  CCA_model = nn.DCCA(CCA_opt)
 
   layers = {encoder, decoder, generator}
   if opt.brnn == 1 then
