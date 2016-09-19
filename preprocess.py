@@ -49,14 +49,20 @@ class Indexer:
                 print >>out, k, v                
         out.close()
 
-    def prune_vocab(self, k):
+    def prune_vocab(self, k, n):
         vocab_list = [(word, count) for word, count in self.vocab.iteritems()]
         vocab_list.sort(key = lambda x: x[1], reverse=True)
+        if n == 1:
+            keyword = open("keyword.txt", 'w')
+            for item in vocab_list:
+                print>>keyword, item[0]
+            keyword.close()
         k = min(k, len(vocab_list))
         self.pruned_vocab = {pair[0]:pair[1] for pair in vocab_list[:k]}
         for word in self.pruned_vocab:
             if word not in self.d:
                 self.d[word] = len(self.d) + 1
+
 
     def load_vocab(self, vocab_file, chars=0):
         self.d = {}
@@ -76,6 +82,7 @@ def get_data(args):
     src_indexer = Indexer(["<blank>","<unk>","<s>","</s>"])
     target_indexer = Indexer(["<blank>","<unk>","<s>","</s>"])    
     char_indexer = Indexer(["<blank>","<unk>","{","}"])
+    sent_indexer = Indexer(["<blank>","<unk>","<s>","</s>"])
     char_indexer.add_w([src_indexer.PAD, src_indexer.UNK, src_indexer.BOS, src_indexer.EOS])
     
     def make_vocab(srcfile, targetfile, seqlength, max_word_l=0, chars=0):
@@ -122,6 +129,8 @@ def get_data(args):
         targets = np.zeros((num_sents, newseqlength), dtype=int)
         target_output = np.zeros((num_sents, newseqlength), dtype=int)
         sources = np.zeros((num_sents, newseqlength), dtype=int)
+        if args.keyword_file != '':
+            keyword_vecs = np.zeros((num_sents, len(words)), dtype=int)
         source_lengths = np.zeros((num_sents,), dtype=int)
         target_lengths = np.zeros((num_sents,), dtype=int)
         if chars==1:
@@ -145,18 +154,25 @@ def get_data(args):
                 continue                   
             targ = pad(targ, newseqlength+1, target_indexer.PAD)
             targ_char = []
+            if args.keyword_file != '':
+                keyword_vec = np.zeros(len(words), dtype=int)
             for word in targ:
                 if chars == 1:
                     word = char_indexer.clean(word)
                 #use UNK for target, but not for source
                 word = word if word in target_indexer.d else target_indexer.UNK
+                # for keywords
+                if args.keyword_file != '':
+                    if word in keywords:
+                        keyword_vec[keywords[word]] = 1
+
                 if chars == 1:
                     char = [char_indexer.BOS] + list(word) + [char_indexer.EOS]
                     if len(char) > max_word_l:
                         char = char[:max_word_l]
                         char[-1] = char_indexer.EOS
                     char_idx = char_indexer.convert_sequence(pad(char, max_word_l, char_indexer.PAD))
-                    targ_char.append(char_idx)                    
+                    targ_char.append(char_idx)                   
             targ = target_indexer.convert_sequence(targ)
             targ = np.array(targ, dtype=int)
 
@@ -183,7 +199,8 @@ def get_data(args):
                 if targ_unks > unkfilter or src_unks > unkfilter:
                     dropped += 1
                     continue
-                
+            if args.keyword_file != '':
+                keyword_vecs[sent_id] = keyword_vec
             targets[sent_id] = np.array(targ[:-1],dtype=int)
             target_lengths[sent_id] = (targets[sent_id] != 1).sum()
             if chars == 1:
@@ -206,6 +223,8 @@ def get_data(args):
             sources = sources[rand_idx]
             source_lengths = source_lengths[rand_idx]
             target_lengths = target_lengths[rand_idx]
+            if args.keyword_file != '':
+                keyword_vecs = keyword_vecs[rand_idx]
             if chars==1:
                 sources_char = sources_char[rand_idx]
                 targets_char = targets_char[rand_idx]
@@ -214,6 +233,8 @@ def get_data(args):
         source_lengths = source_lengths[:sent_id]
         source_sort = np.argsort(source_lengths) 
 
+        if args.keyword_file != '':
+            keyword_vecs = keyword_vecs[source_sort]        
         sources = sources[source_sort]
         targets = targets[source_sort]
         target_output = target_output[source_sort]
@@ -260,6 +281,8 @@ def get_data(args):
         f["target_nonzeros"] = np.array(nonzeros, dtype=int)
         f["source_size"] = np.array([len(src_indexer.d)])
         f["target_size"] = np.array([len(target_indexer.d)])
+        if args.keyword_file != '':
+            f['vecs'] = keyword_vecs
         if chars == 1:            
             del sources, targets, target_output
             sources_char = sources_char[source_sort]
@@ -286,8 +309,8 @@ def get_data(args):
         print("Max word length (after cutting): {}".format(max_word_l))
 
     #prune and write vocab
-    src_indexer.prune_vocab(args.srcvocabsize)
-    target_indexer.prune_vocab(args.targetvocabsize)
+    src_indexer.prune_vocab(args.srcvocabsize,0)
+    target_indexer.prune_vocab(args.targetvocabsize, 1)
     if args.srcvocabfile != '':
         print('Loading pre-specified source vocab from ' + args.srcvocabfile)
         src_indexer.load_vocab(args.srcvocabfile, args.chars)
@@ -370,8 +393,22 @@ def main(arguments):
     parser.add_argument('--shuffle', help="If = 1, shuffle sentences before sorting (based on  "
                                            "source length).",
                                           type = int, default = 0)
-    
+    parser.add_argument('--keyword_file', help="Path to keyword_file.", default='')
     args = parser.parse_args(arguments)
+    if args.keyword_file != '':
+        with open(args.keyword_file) as f:
+            global words 
+            words = f.readlines()
+        print words
+        global keywords 
+        keywords= {}
+        word_count = 0
+        for item in words:
+            witem = item.strip('\n')
+            keywords[witem] = word_count
+            word_count = word_count+1
+
+    #debug
     get_data(args)
 
 if __name__ == '__main__':
