@@ -11,6 +11,7 @@ import numpy as np
 import h5py
 import itertools
 from collections import defaultdict
+import csv
 
 class Indexer:
     def __init__(self, symbols = ["<blank>","<unk>","<s>","</s>"]):
@@ -281,6 +282,7 @@ def get_data(args):
         f["target_nonzeros"] = np.array(nonzeros, dtype=int)
         f["source_size"] = np.array([len(src_indexer.d)])
         f["target_size"] = np.array([len(target_indexer.d)])
+        print("total keywords: {}".format(sum(sum(keyword_vecs))))
         if args.keyword_file != '':
             f['vecs'] = keyword_vecs
         if chars == 1:            
@@ -407,6 +409,13 @@ def main(arguments):
             witem = item.strip('\n')
             keywords[witem] = word_count
             word_count = word_count+1
+        w = open(args.outputfile + "/keywords.dict", "w")
+        for key, val in keywords.items():
+            w.write(key)
+            w.write(' ')
+            s = str(val)
+            w.write(s)
+            w.write('\n')
 
     #debug
     get_data(args)
