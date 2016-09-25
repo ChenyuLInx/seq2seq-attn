@@ -39,6 +39,10 @@ cmd:option('-gpuid', -1, [[ID of the GPU to use (-1 = use CPU)]])
 cmd:option('-gpuid2', -1, [[Second GPU ID]])
 cmd:option('-cudnn', 0, [[If using character model, this should be = 1 if the character model was trained using cudnn]])
 
+-- vector spec
+cmd:option('-vector', 0, [[If one output the vector]])
+cmd:option('-vector_file', '', [[output_file for vector]])
+
 function copy(orig)
   local orig_type = type(orig)
   local copy
@@ -114,6 +118,7 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
   local next_ys = torch.LongTensor(n, K):fill(1)
   -- Current Scores.
   local scores = torch.FloatTensor(n, K)
+  local context_vec
   scores:zero()
   local source_l = math.min(source:size(1), opt.max_sent_l)
   local attn_argmax = {} -- store attn weights
@@ -145,6 +150,9 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
     local out = model[1]:forward(encoder_input)
     rnn_state_enc = out
     context[{{},t}]:copy(out[#out])
+    if t == source_l then
+      context_vec = out[#out]
+    end
   end
   rnn_state_dec = {}
   for i = 1, #init_fwd_dec do
@@ -342,7 +350,7 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
     max_attn_argmax = end_attn_argmax
   end
 
-  return max_hyp, max_score, max_attn_argmax, gold_score, states[i], scores[i], attn_argmax[i]
+  return max_hyp, max_score, max_attn_argmax, gold_score, states[i], scores[i], attn_argmax[i], context_vec
 end
 
 function idx2key(file)
@@ -619,6 +627,11 @@ function main()
   pred_sents = {}
   local file = io.open(opt.src_file, "r")
   local out_file = io.open(opt.output_file,'w')
+  local vector_file 
+  if opt.vector ==1 then
+    vector_file= io.open(opt.vector_file,"w")
+  end
+  local context_vec_out
   for line in file:lines() do
     sent_id = sent_id + 1
     line = clean_sent(line)
@@ -633,8 +646,11 @@ function main()
       target, target_str = sent2wordidx(gold[sent_id], word2idx_targ, 1)
     end
     state = State.initial(START)
-    pred, pred_score, attn, gold_score, all_sents, all_scores, all_attn = generate_beam(model,
+    pred, pred_score, attn, gold_score, all_sents, all_scores, all_attn,  context_vec_tmp= generate_beam(model,
       state, opt.beam, MAX_SENT_L, source, target)
+    
+    context_vec_out = torch.cat(context_vec_out, context_vec_tmp, 1)
+
     pred_score_total = pred_score_total + pred_score
     pred_words_total = pred_words_total + #pred - 1
     pred_sent = wordidx2sent(pred, idx2word_targ, source_str, attn, true)
@@ -659,6 +675,24 @@ function main()
 
     print('')
   end
+
+  if opt.vector == 1 then 
+    splitter = ","
+
+    for i=1,context_vec_out:size(1) do
+        for j=1,context_vec_out:size(2) do
+            vector_file:write(subtensor[i][j])
+            if j == context_vec_out:size(2) then
+                vector_file:write("\n")
+            else
+                vector_file:write(splitter)
+            end
+        end
+    end
+    vector_file:close()
+
+  end
+
   print(string.format("PRED AVG SCORE: %.4f, PRED PPL: %.4f", pred_score_total / pred_words_total,
       math.exp(-pred_score_total/pred_words_total)))
   if opt.score_gold == 1 then

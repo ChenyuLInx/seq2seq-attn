@@ -11,7 +11,6 @@ import numpy as np
 import h5py
 import itertools
 from collections import defaultdict
-import csv
 
 class Indexer:
     def __init__(self, symbols = ["<blank>","<unk>","<s>","</s>"]):
@@ -131,7 +130,7 @@ def get_data(args):
         target_output = np.zeros((num_sents, newseqlength), dtype=int)
         sources = np.zeros((num_sents, newseqlength), dtype=int)
         if args.keyword_file != '':
-            keyword_vecs = np.zeros((num_sents, len(words)), dtype=int)
+            keyword_vecs = np.zeros((num_sents, len(keywords)), dtype=int)
         source_lengths = np.zeros((num_sents,), dtype=int)
         target_lengths = np.zeros((num_sents,), dtype=int)
         if chars==1:
@@ -156,7 +155,7 @@ def get_data(args):
             targ = pad(targ, newseqlength+1, target_indexer.PAD)
             targ_char = []
             if args.keyword_file != '':
-                keyword_vec = np.zeros(len(words), dtype=int)
+                keyword_vec = np.zeros(len(keywords), dtype=int)
             for word in targ:
                 if chars == 1:
                     word = char_indexer.clean(word)
@@ -165,7 +164,7 @@ def get_data(args):
                 # for keywords
                 if args.keyword_file != '':
                     if word in keywords:
-                        keyword_vec[keywords[word]] = 1
+                        keyword_vec[keywords[word]-1] = 1
 
                 if chars == 1:
                     char = [char_indexer.BOS] + list(word) + [char_indexer.EOS]
@@ -312,7 +311,7 @@ def get_data(args):
 
     #prune and write vocab
     src_indexer.prune_vocab(args.srcvocabsize,0)
-    target_indexer.prune_vocab(args.targetvocabsize, 1)
+    target_indexer.prune_vocab(args.targetvocabsize, 0)
     if args.srcvocabfile != '':
         print('Loading pre-specified source vocab from ' + args.srcvocabfile)
         src_indexer.load_vocab(args.srcvocabfile, args.chars)
@@ -398,24 +397,30 @@ def main(arguments):
     parser.add_argument('--keyword_file', help="Path to keyword_file.", default='')
     args = parser.parse_args(arguments)
     if args.keyword_file != '':
-        with open(args.keyword_file) as f:
-            global words 
+        with open(args.keyword_file) as f: 
             words = f.readlines()
-        print words
         global keywords 
         keywords= {}
-        word_count = 0
+        word_count = 1
         for item in words:
             witem = item.strip('\n')
-            keywords[witem] = word_count
-            word_count = word_count+1
-        w = open(args.outputfile + "/keywords.dict", "w")
-        for key, val in keywords.items():
-            w.write(key)
-            w.write(' ')
-            s = str(val)
-            w.write(s)
-            w.write('\n')
+            if not witem in keywords:
+            	keywords[witem] = word_count
+            	word_count = word_count+1
+	print keywords
+        w = open(args.outputfile + ".keywords.dict", "w")
+        items = [(v, k) for k, v in keywords.iteritems()]
+        items.sort()
+        for v, k in items:
+            print >>w, k, v
+        w.close()
+        #w = open(args.outputfile + ".keywords.dict", "w")
+        #for key, val in keywords.items():
+        #    w.write(key)
+        #    w.write(' ')
+        #    s = str(val)
+        #    w.write(s)
+        #    w.write('\n')
 
     #debug
     get_data(args)

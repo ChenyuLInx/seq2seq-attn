@@ -178,6 +178,15 @@ function make_generator(data, opt)
   return model, criterion
 end
 
+function keyword_generator(vecs, opt)
+  local model = nn.Sequential()
+  model:add(nn.Linear(opt.rnn_size, vecs:size(1)))
+  model:add(nn.Sigmoid())
+  local criterion = nn.BCECriterion()
+  criterion.sizeAverage = false
+  return model, criterion
+end
+
 -- cnn Unit
 function make_cnn(input_size, kernel_width, num_kernels)
   local output
