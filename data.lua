@@ -17,6 +17,8 @@ function data:__init(opt, data_file)
   self.source_l = f:read('batch_w'):all() --max source length each batch
   if opt.load_key_vecs == 1 then
     self.keyword_vecs = f:read('vecs'):all()
+    self.batch_keyword_l = f:read('batch_keyword_l'):all()
+    self.keyword_size = f:read('keyword_size'):all()[1]
   end
   if opt.start_symbol == 0 then
     self.source_l:add(-2)
@@ -66,7 +68,9 @@ function data:__init(opt, data_file)
         1, self.source_l[i]):transpose(1,2)
     end
     if opt.load_key_vecs == 1 then 
-      keyword_vec_i = self.keyword_vecs:sub(self.batch_idx[i], self.batch_idx[i]+self.batch_l[i]-1):transpose(1,2)
+      local keyword_len = self.batch_keyword_l[i]
+      keyword_vec_i = self.keyword_vecs:sub(self.batch_idx[i], self.batch_idx[i]+self.batch_l[i]-1, 1, keyword_len):transpose(1,2)
+      
     end
     if opt.reverse_src == 1 then
       source_i = source_i:index(1, source_l_rev[{{max_source_l-self.source_l[i]+1,
@@ -91,7 +95,8 @@ function data:__init(opt, data_file)
         self.target_l[i],
         self.source_l[i],
         target_l_i,
-        keyword_vec_i})
+        keyword_vec_i,
+        self.batch_keyword_l[i]})
     else
       table.insert(self.batches, {target_i,
         target_output_i:transpose(1,2),
@@ -121,10 +126,20 @@ function data.__index(self, idx)
     local target_l = self.batches[idx][6]
     local source_l = self.batches[idx][7]
     local target_l_all = self.batches[idx][8]
+    local keyword_idx_vec = self.batches[idx][9]:transpose(1,2)
+    local keyword_len = self.batches[idx][10]
     local keyword_vec
     if opt.load_key_vecs == 1 then
-      keyword_vec = self.batches[idx][9]
+      keyword_vec = torch.zeros(batch_l, self.keyword_size)
+      for sent_id = 1, batch_l do
+        for word_num = 1, keyword_len do
+          if keyword_idx_vec[sent_id][word_num] ~= 0 then
+            keyword_vec[sent_id][keyword_idx_vec[sent_id][word_num]] = 1
+          end
+        end
+      end
     end
+    keyword_vec = keyword_vec:transpose(1,2)
     if opt.gpuid >= 0 then --if multi-gpu, source lives in gpuid1, rest on gpuid2
       cutorch.setDevice(opt.gpuid)
       source_input = source_input:cuda()
